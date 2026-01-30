@@ -7,6 +7,7 @@ import os
 import time
 from typing import Dict, Any, List, Set, Tuple
 from urllib.parse import quote
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
 from requests.auth import HTTPBasicAuth
@@ -27,7 +28,7 @@ USERNAME = "XIEYONGDONG@newgonow.cn"
 PASSWORD = "Max@sap2022"
 ROLE_CODES = ["1001", "40", "43"]
 
-API_TOP = 200
+API_TOP = 500
 API_SKIP_START = 0
 TIMEOUT = 60
 VERIFY_SSL = True
@@ -44,6 +45,7 @@ DELETE_BEFORE_UPLOAD = True
 BATCH_TICKETS = 500
 MAX_PATHS_PER_UPDATE = 8000           # ✅ 单次 update 最大路径数（保险）
 MAX_BYTES_PER_UPDATE = 6_000_000      # ✅ 单次 update 估算最大字节（保险）
+MAX_WORKERS = 8                       # ✅ 并发拉取页数（提升速度）
 # ===============================================
 
 SERVER_TIMESTAMP = {".sv": "timestamp"}
@@ -53,10 +55,6 @@ ROLE_VARYING_FIELDS = [
     "InvolvedPartyID",
     "InvolvedPartyName",
     "InvolvedPartyRoleID",
-    "RepairerBusinessNameID",
-    "RepairerEmail",
-    "RepairerPhoneNumber",
-    "RepairerNamePointOfContact",
     "requested_skip",
 ]
 
@@ -130,23 +128,56 @@ def fetch_role_page(session: requests.Session, role_code: str, top: int, skip: i
     return rows, meta
 
 
+def _fetch_role_page_fresh_session(role_code: str, top: int, skip: int):
+    sess = make_session()
+    try:
+        rows, meta = fetch_role_page(sess, role_code, top, skip)
+    finally:
+        sess.close()
+    return skip, rows, meta
+
+
 def iter_role_all_rows(session: requests.Session, role_code: str):
     skip = API_SKIP_START
     page = 0
-    while True:
-        rows, meta = fetch_role_page(session, role_code, API_TOP, skip)
-        page += 1
-        print(f"[FETCH] role={role_code} page={page} skip={skip} rows={len(rows)} meta={meta}")
+    rows, meta = fetch_role_page(session, role_code, API_TOP, skip)
+    page += 1
+    print(f"[FETCH] role={role_code} page={page} skip={skip} rows={len(rows)} meta={meta}")
 
-        if not rows:
-            break
+    if not rows:
+        return
 
-        for rr in rows:
-            yield rr
+    for rr in rows:
+        yield rr
 
-        if len(rows) < API_TOP:
-            break
-        skip += API_TOP
+    total = meta.get("totalCount") or meta.get("count")
+    if not total:
+        while True:
+            skip += API_TOP
+            rows, meta = fetch_role_page(session, role_code, API_TOP, skip)
+            page += 1
+            print(f"[FETCH] role={role_code} page={page} skip={skip} rows={len(rows)} meta={meta}")
+            if not rows:
+                break
+            for rr in rows:
+                yield rr
+            if len(rows) < API_TOP:
+                break
+        return
+
+    skips = list(range(skip + API_TOP, total, API_TOP))
+    if not skips:
+        return
+
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        future_map = {executor.submit(_fetch_role_page_fresh_session, role_code, API_TOP, sk): sk for sk in skips}
+        for future in as_completed(future_map):
+            sk = future_map[future]
+            rows, meta = future.result()[1:]
+            page += 1
+            print(f"[FETCH] role={role_code} page~={page} skip={sk} rows={len(rows)} meta={meta}")
+            for rr in rows:
+                yield rr
 
 
 # ---------- Firebase init ----------
