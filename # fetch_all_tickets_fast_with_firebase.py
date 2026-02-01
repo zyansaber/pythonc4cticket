@@ -400,7 +400,7 @@ def diff_ticket_summaries(current_root: str, previous_root: str) -> None:
 
     status_changes: Dict[Tuple[Any, Any], int] = {}
     status_text_changes: Dict[Tuple[Any, Any], int] = {}
-    changed_tickets: List[Tuple[str, Any, Any]] = []
+    changed_tickets: List[Dict[str, Any]] = []
 
     for tid, curr_ticket in current.items():
         prev_ticket = previous.get(tid, {})
@@ -420,7 +420,17 @@ def diff_ticket_summaries(current_root: str, previous_root: str) -> None:
             )
 
         if curr_status != prev_status or curr_status_text != prev_status_text:
-            changed_tickets.append((tid, curr_status, curr_status_text))
+            role_40_name = (curr_ticket or {}).get("roles", {}).get("40", {}).get("InvolvedPartyName")
+            changed_tickets.append(
+                {
+                    "TicketID": tid,
+                    "TicketStatusOld": prev_status,
+                    "TicketStatusNew": curr_status,
+                    "TicketStatusTextOld": prev_status_text,
+                    "TicketStatusTextNew": curr_status_text,
+                    "Role40InvolvedPartyName": role_40_name,
+                }
+            )
 
     print("\n================ DIFF SUMMARY ================")
     print(f"Tickets with CreatedOn in {current_root}: {created_on_count}")
@@ -430,10 +440,27 @@ def diff_ticket_summaries(current_root: str, previous_root: str) -> None:
     print("TicketStatusText changes (prev -> curr):")
     for (prev_text, curr_text), count in sorted(status_text_changes.items(), key=lambda x: (-x[1], x[0])):
         print(f"  {prev_text} -> {curr_text}: {count}")
-    print("Changed tickets (TicketID | TicketStatus | TicketStatusText | roles/40 InvolvedPartyName):")
-    for tid, status, status_text in changed_tickets:
-        role_40_name = (current.get(tid, {}) or {}).get("roles", {}).get("40", {}).get("InvolvedPartyName")
-        print(f"  {tid} | {status} | {status_text} | {role_40_name}")
+    print("Changed tickets (TicketID | Old/New Status | Old/New StatusText | roles/40 InvolvedPartyName):")
+    for item in changed_tickets:
+        print(
+            "  {TicketID} | {TicketStatusOld}->{TicketStatusNew} | "
+            "{TicketStatusTextOld}->{TicketStatusTextNew} | {Role40InvolvedPartyName}".format(**item)
+        )
+
+    db.reference("dailyprogress").update(
+        {
+            "createdOnCount": created_on_count,
+            "ticketStatusChanges": [
+                {"from": k[0], "to": k[1], "count": v}
+                for k, v in sorted(status_changes.items(), key=lambda x: (-x[1], x[0]))
+            ],
+            "ticketStatusTextChanges": [
+                {"from": k[0], "to": k[1], "count": v}
+                for k, v in sorted(status_text_changes.items(), key=lambda x: (-x[1], x[0]))
+            ],
+            "ticketStatusDiffs": changed_tickets,
+        }
+    )
 
 
 def split_ticket_row(row: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
