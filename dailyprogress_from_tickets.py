@@ -112,7 +112,6 @@ def main() -> None:
 
     current_updateat = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
-    _copy_root_with_updateat(CURRENT_ROOT, PREVIOUS_ROOT, PREVIOUS_UPDATEAT)
     db.reference(CURRENT_ROOT).update({"updateat": current_updateat})
 
     current_tickets = _as_dict(db.reference(f"{CURRENT_ROOT}/tickets").get())
