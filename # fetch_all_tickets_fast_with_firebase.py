@@ -40,7 +40,6 @@ FIREBASE_SA_PATH = r"C:\Users\yan\Desktop\snowy-hr-report-firebase-adminsdk-fbsv
 
 FIREBASE_ROOT = "c4cTickets_test"   # 写入根（不要带 /）
 DELETE_BEFORE_UPLOAD = True
-MAX_BACKUPS = 7
 
 # 你原来按 ticket 数量 flush 没问题，但还需要加“路径数/字节数”保险
 BATCH_TICKETS = 500
@@ -151,8 +150,8 @@ def iter_role_all_rows(session: requests.Session, role_code: str):
     for rr in rows:
         yield rr
 
-    total_raw = meta.get("totalCount") or meta.get("count")
-    if total_raw in (None, "", 0, "0"):
+    total = meta.get("totalCount") or meta.get("count")
+    if not total:
         while True:
             skip += API_TOP
             rows, meta = fetch_role_page(session, role_code, API_TOP, skip)
@@ -164,14 +163,6 @@ def iter_role_all_rows(session: requests.Session, role_code: str):
                 yield rr
             if len(rows) < API_TOP:
                 break
-        return
-
-    try:
-        total = int(total_raw)
-    except (TypeError, ValueError):
-        total = None
-
-    if not total:
         return
 
     skips = list(range(skip + API_TOP, total, API_TOP))
@@ -360,80 +351,6 @@ def fb_update_with_retry(path: str, payload: dict, tries: int = 5):
     raise RuntimeError(f"[FB] update failed after {tries} tries: {last_err}")
 
 
-def _root_exists(path: str) -> bool:
-    return db.reference(path).get(shallow=True) is not None
-
-
-def _copy_root(src: str, dst: str) -> None:
-    data = db.reference(src).get()
-    if data is None:
-        fb_delete_tree(dst)
-        return
-    db.reference(dst).set(data)
-
-
-def rotate_backups() -> None:
-    oldest = f"{FIREBASE_ROOT}_{MAX_BACKUPS}"
-    if _root_exists(oldest):
-        fb_delete_tree(oldest)
-
-    for i in range(MAX_BACKUPS - 1, 0, -1):
-        src = f"{FIREBASE_ROOT}_{i}"
-        dst = f"{FIREBASE_ROOT}_{i + 1}"
-        if _root_exists(src):
-            _copy_root(src, dst)
-            fb_delete_tree(src)
-
-    if _root_exists(FIREBASE_ROOT):
-        _copy_root(FIREBASE_ROOT, f"{FIREBASE_ROOT}_1")
-
-
-def diff_ticket_summaries(current_root: str, previous_root: str) -> None:
-    current = db.reference(f"{current_root}/tickets").get() or {}
-    previous = db.reference(f"{previous_root}/tickets").get() or {}
-
-    created_on_count = sum(
-        1 for ticket in current.values() if isinstance(ticket, dict) and ticket.get("ticket", {}).get("CreatedOn")
-    )
-
-    status_changes: Dict[Tuple[Any, Any], int] = {}
-    status_text_changes: Dict[Tuple[Any, Any], int] = {}
-    changed_tickets: List[Tuple[str, Any, Any]] = []
-
-    for tid, curr_ticket in current.items():
-        prev_ticket = previous.get(tid, {})
-        curr_info = (curr_ticket or {}).get("ticket", {})
-        prev_info = (prev_ticket or {}).get("ticket", {})
-
-        curr_status = curr_info.get("TicketStatus")
-        prev_status = prev_info.get("TicketStatus")
-        if curr_status != prev_status:
-            status_changes[(prev_status, curr_status)] = status_changes.get((prev_status, curr_status), 0) + 1
-
-        curr_status_text = curr_info.get("TicketStatusText")
-        prev_status_text = prev_info.get("TicketStatusText")
-        if curr_status_text != prev_status_text:
-            status_text_changes[(prev_status_text, curr_status_text)] = (
-                status_text_changes.get((prev_status_text, curr_status_text), 0) + 1
-            )
-
-        if curr_status != prev_status or curr_status_text != prev_status_text:
-            changed_tickets.append((tid, curr_status, curr_status_text))
-
-    print("\n================ DIFF SUMMARY ================")
-    print(f"Tickets with CreatedOn in {current_root}: {created_on_count}")
-    print("TicketStatus changes (prev -> curr):")
-    for (prev_status, curr_status), count in sorted(status_changes.items(), key=lambda x: (-x[1], x[0])):
-        print(f"  {prev_status} -> {curr_status}: {count}")
-    print("TicketStatusText changes (prev -> curr):")
-    for (prev_text, curr_text), count in sorted(status_text_changes.items(), key=lambda x: (-x[1], x[0])):
-        print(f"  {prev_text} -> {curr_text}: {count}")
-    print("Changed tickets (TicketID | TicketStatus | TicketStatusText | roles/40 InvolvedPartyName):")
-    for tid, status, status_text in changed_tickets:
-        role_40_name = (current.get(tid, {}) or {}).get("roles", {}).get("40", {}).get("InvolvedPartyName")
-        print(f"  {tid} | {status} | {status_text} | {role_40_name}")
-
-
 def split_ticket_row(row: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     ticket_data: Dict[str, Any] = {}
     role_data: Dict[str, Any] = {}
@@ -469,8 +386,6 @@ def main():
         raise SystemExit("请先填写 USERNAME / PASSWORD（建议用环境变量 C4C_USERNAME / C4C_PASSWORD）")
 
     firebase_init()
-
-    rotate_backups()
 
     if DELETE_BEFORE_UPLOAD:
         print(f"[FB] deleting /{FIREBASE_ROOT} (safe batched) ...")
@@ -536,7 +451,6 @@ def main():
     print(f"Total unique TicketIDs seen: {len(total_unique_tickets_seen)}")
     print(f"Total batches uploaded: {batch_no}")
     print(f"✅ Uploaded to /{FIREBASE_ROOT}/tickets/<TicketID>/ticket + roles/<roleCode> + updatedAt (FULL LOAD)")
-    diff_ticket_summaries(FIREBASE_ROOT, f"{FIREBASE_ROOT}_1")
 
 
 if __name__ == "__main__":
