@@ -100,17 +100,21 @@ def _summarize_diff(current: Dict[str, Any], previous: Dict[str, Any]) -> Dict[s
                 }
             )
 
+    def _sort_change(item: Tuple[Tuple[Any, Any], int]) -> Tuple[int, str]:
+        key, count = item
+        return (-count, f"{key[0]}->{key[1]}")
+
     return {
         "createdOnCountCurrent": created_on_count_current,
         "createdOnCountPrevious": created_on_count_previous,
         "createdOnCountDelta": created_on_count_current - created_on_count_previous,
         "ticketStatusChanges": [
             {"from": k[0], "to": k[1], "count": v, "role40InvolvedPartyNames": _role_names_for_change(current, previous, k)}
-            for k, v in sorted(status_changes.items(), key=lambda x: (-x[1], x[0]))
+            for k, v in sorted(status_changes.items(), key=_sort_change)
         ],
         "ticketStatusTextChanges": [
             {"from": k[0], "to": k[1], "count": v, "role40InvolvedPartyNames": _role_names_for_change(current, previous, k, field="TicketStatusText")}
-            for k, v in sorted(status_text_changes.items(), key=lambda x: (-x[1], x[0]))
+            for k, v in sorted(status_text_changes.items(), key=_sort_change)
         ],
         "changedTickets": changed_tickets,
     }
