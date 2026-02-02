@@ -94,8 +94,10 @@ def _summarize_diff(current: Dict[str, Any], previous: Dict[str, Any]) -> Dict[s
             changed_tickets.append(
                 {
                     "TicketID": tid,
-                    "TicketStatus": curr_status,
-                    "TicketStatusText": curr_status_text,
+                    "TicketStatusOld": prev_status,
+                    "TicketStatusNew": curr_status,
+                    "TicketStatusTextOld": prev_status_text,
+                    "TicketStatusTextNew": curr_status_text,
                     "Role40InvolvedPartyName": role_40_name,
                 }
             )
@@ -151,8 +153,21 @@ def main() -> None:
     _debug_ticket_status(DEBUG_TICKET_ID)
 
     summary = _summarize_diff(current_tickets, previous_tickets)
-    summary["currentUpdateAt"] = current_updateat
-    summary["previousUpdateAt"] = PREVIOUS_UPDATEAT
+    previous_updateat = db.reference(f"{PREVIOUS_ROOT}/updateat").get()
+    current_updateat_stored = db.reference(f"{CURRENT_ROOT}/updateat").get()
+
+    summary["currentUpdateAt"] = current_updateat_stored
+    summary["previousUpdateAt"] = previous_updateat
+    summary["previousSnapshot"] = {
+        "root": PREVIOUS_ROOT,
+        "updateAt": previous_updateat,
+        "ticketCount": len(previous_tickets),
+    }
+    summary["currentSnapshot"] = {
+        "root": CURRENT_ROOT,
+        "updateAt": current_updateat_stored,
+        "ticketCount": len(current_tickets),
+    }
 
     db.reference(DAILY_PROGRESS_ROOT).set(summary)
     print(f"[FB] dailyprogress updated with {len(summary['changedTickets'])} changed tickets.")
