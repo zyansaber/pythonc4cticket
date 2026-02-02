@@ -26,13 +26,6 @@ def _as_dict(value: Any) -> Dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
-def _copy_root_with_updateat(src: str, dst: str, updateat: str) -> None:
-    data = db.reference(src).get() or {}
-    payload = _as_dict(data)
-    payload["updateat"] = updateat
-    db.reference(dst).set(payload)
-
-
 def _summarize_diff(current: Dict[str, Any], previous: Dict[str, Any]) -> Dict[str, Any]:
     created_on_count_current = sum(
         1 for ticket in current.values() if isinstance(ticket, dict) and ticket.get("ticket", {}).get("CreatedOn")
