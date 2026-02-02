@@ -13,6 +13,7 @@ CURRENT_ROOT = "c4cTickets_test"
 PREVIOUS_ROOT = "c4cTickets_test_1"
 DAILY_PROGRESS_ROOT = "dailyprogress"
 PREVIOUS_UPDATEAT = "2026-01-30T00:00:00"
+DEBUG_TICKET_ID = "30105"
 
 
 def firebase_init() -> None:
@@ -24,6 +25,27 @@ def firebase_init() -> None:
 
 def _as_dict(value: Any) -> Dict[str, Any]:
     return value if isinstance(value, dict) else {}
+
+
+def _debug_ticket_status(current: Dict[str, Any], previous: Dict[str, Any], ticket_id: str) -> None:
+    curr_ticket = current.get(ticket_id, {})
+    prev_ticket = previous.get(ticket_id, {})
+    curr_status = (curr_ticket or {}).get("ticket", {}).get("TicketStatus")
+    prev_status = (prev_ticket or {}).get("ticket", {}).get("TicketStatus")
+    curr_text = (curr_ticket or {}).get("ticket", {}).get("TicketStatusText")
+    prev_text = (prev_ticket or {}).get("ticket", {}).get("TicketStatusText")
+
+    print(
+        "[DEBUG] TicketID {tid}: "
+        "current TicketStatus={curr_status}, TicketStatusText={curr_text}; "
+        "previous TicketStatus={prev_status}, TicketStatusText={prev_text}".format(
+            tid=ticket_id,
+            curr_status=curr_status,
+            curr_text=curr_text,
+            prev_status=prev_status,
+            prev_text=prev_text,
+        )
+    )
 
 
 def _summarize_diff(current: Dict[str, Any], previous: Dict[str, Any]) -> Dict[str, Any]:
@@ -109,6 +131,8 @@ def main() -> None:
 
     current_tickets = _as_dict(db.reference(f"{CURRENT_ROOT}/tickets").get())
     previous_tickets = _as_dict(db.reference(f"{PREVIOUS_ROOT}/tickets").get())
+
+    _debug_ticket_status(current_tickets, previous_tickets, DEBUG_TICKET_ID)
 
     summary = _summarize_diff(current_tickets, previous_tickets)
     summary["currentUpdateAt"] = current_updateat
