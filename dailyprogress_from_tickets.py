@@ -27,13 +27,13 @@ def _as_dict(value: Any) -> Dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
-def _debug_ticket_status(current: Dict[str, Any], previous: Dict[str, Any], ticket_id: str) -> None:
-    curr_ticket = current.get(ticket_id, {})
-    prev_ticket = previous.get(ticket_id, {})
-    curr_status = (curr_ticket or {}).get("ticket", {}).get("TicketStatus")
-    prev_status = (prev_ticket or {}).get("ticket", {}).get("TicketStatus")
-    curr_text = (curr_ticket or {}).get("ticket", {}).get("TicketStatusText")
-    prev_text = (prev_ticket or {}).get("ticket", {}).get("TicketStatusText")
+def _debug_ticket_status(ticket_id: str) -> None:
+    curr_ticket = db.reference(f"{CURRENT_ROOT}/tickets/{ticket_id}/ticket").get() or {}
+    prev_ticket = db.reference(f"{PREVIOUS_ROOT}/tickets/{ticket_id}/ticket").get() or {}
+    curr_status = (curr_ticket or {}).get("TicketStatus")
+    prev_status = (prev_ticket or {}).get("TicketStatus")
+    curr_text = (curr_ticket or {}).get("TicketStatusText")
+    prev_text = (prev_ticket or {}).get("TicketStatusText")
 
     print(
         "[DEBUG] TicketID {tid}: "
@@ -132,7 +132,7 @@ def main() -> None:
     current_tickets = _as_dict(db.reference(f"{CURRENT_ROOT}/tickets").get())
     previous_tickets = _as_dict(db.reference(f"{PREVIOUS_ROOT}/tickets").get())
 
-    _debug_ticket_status(current_tickets, previous_tickets, DEBUG_TICKET_ID)
+    _debug_ticket_status(DEBUG_TICKET_ID)
 
     summary = _summarize_diff(current_tickets, previous_tickets)
     summary["currentUpdateAt"] = current_updateat
