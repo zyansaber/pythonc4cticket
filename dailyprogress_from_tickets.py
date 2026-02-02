@@ -27,6 +27,10 @@ def _as_dict(value: Any) -> Dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+def _normalize_ticket_map(raw: Dict[Any, Any]) -> Dict[str, Any]:
+    return {str(k): v for k, v in raw.items()}
+
+
 def _debug_ticket_status(ticket_id: str) -> None:
     curr_ticket = db.reference(f"{CURRENT_ROOT}/tickets/{ticket_id}/ticket").get() or {}
     prev_ticket = db.reference(f"{PREVIOUS_ROOT}/tickets/{ticket_id}/ticket").get() or {}
@@ -129,8 +133,8 @@ def main() -> None:
 
     db.reference(CURRENT_ROOT).update({"updateat": current_updateat})
 
-    current_tickets = _as_dict(db.reference(f"{CURRENT_ROOT}/tickets").get())
-    previous_tickets = _as_dict(db.reference(f"{PREVIOUS_ROOT}/tickets").get())
+    current_tickets = _normalize_ticket_map(_as_dict(db.reference(f"{CURRENT_ROOT}/tickets").get()))
+    previous_tickets = _normalize_ticket_map(_as_dict(db.reference(f"{PREVIOUS_ROOT}/tickets").get()))
 
     _debug_ticket_status(DEBUG_TICKET_ID)
 
