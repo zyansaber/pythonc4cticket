@@ -360,6 +360,34 @@ def fb_update_with_retry(path: str, payload: dict, tries: int = 5):
     raise RuntimeError(f"[FB] update failed after {tries} tries: {last_err}")
 
 
+def _as_ticket_map(value: Any) -> Dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, list):
+        return {str(idx): item for idx, item in enumerate(value) if item is not None}
+    return {}
+
+
+def _normalize_ticket_map(raw: Dict[Any, Any]) -> Dict[str, Any]:
+    return {str(k): v for k, v in raw.items()}
+
+
+def _rotate_dailyprogress(max_backups: int = 7) -> None:
+    oldest = f"dailyprogress_{max_backups}"
+    if _root_exists(oldest):
+        fb_delete_tree(oldest)
+
+    for i in range(max_backups - 1, 0, -1):
+        src = f"dailyprogress_{i}"
+        dst = f"dailyprogress_{i + 1}"
+        if _root_exists(src):
+            _copy_root(src, dst)
+            fb_delete_tree(src)
+
+    if _root_exists("dailyprogress"):
+        _copy_root("dailyprogress", "dailyprogress_1")
+
+
 def _root_exists(path: str) -> bool:
     return db.reference(path).get(shallow=True) is not None
 
@@ -391,8 +419,8 @@ def rotate_backups() -> None:
 def diff_ticket_summaries(current_root: str, previous_root: str) -> None:
     current_raw = db.reference(f"{current_root}/tickets").get()
     previous_raw = db.reference(f"{previous_root}/tickets").get()
-    current = current_raw if isinstance(current_raw, dict) else {}
-    previous = previous_raw if isinstance(previous_raw, dict) else {}
+    current = _normalize_ticket_map(_as_ticket_map(current_raw))
+    previous = _normalize_ticket_map(_as_ticket_map(previous_raw))
 
     created_on_count = sum(
         1 for ticket in current.values() if isinstance(ticket, dict) and ticket.get("ticket", {}).get("CreatedOn")
@@ -434,11 +462,15 @@ def diff_ticket_summaries(current_root: str, previous_root: str) -> None:
 
     print("\n================ DIFF SUMMARY ================")
     print(f"Tickets with CreatedOn in {current_root}: {created_on_count}")
+    def _sort_change(item: Tuple[Tuple[Any, Any], int]) -> Tuple[int, str]:
+        key, count = item
+        return (-count, f"{key[0]}->{key[1]}")
+
     print("TicketStatus changes (prev -> curr):")
-    for (prev_status, curr_status), count in sorted(status_changes.items(), key=lambda x: (-x[1], x[0])):
+    for (prev_status, curr_status), count in sorted(status_changes.items(), key=_sort_change):
         print(f"  {prev_status} -> {curr_status}: {count}")
     print("TicketStatusText changes (prev -> curr):")
-    for (prev_text, curr_text), count in sorted(status_text_changes.items(), key=lambda x: (-x[1], x[0])):
+    for (prev_text, curr_text), count in sorted(status_text_changes.items(), key=_sort_change):
         print(f"  {prev_text} -> {curr_text}: {count}")
     print("Changed tickets (TicketID | Old/New Status | Old/New StatusText | roles/40 InvolvedPartyName):")
     for item in changed_tickets:
@@ -447,18 +479,32 @@ def diff_ticket_summaries(current_root: str, previous_root: str) -> None:
             "{TicketStatusTextOld}->{TicketStatusTextNew} | {Role40InvolvedPartyName}".format(**item)
         )
 
-    db.reference("dailyprogress").update(
+    previous_updateat = db.reference(f"{previous_root}/updateat").get()
+    current_updateat = db.reference(f"{current_root}/updateat").get()
+
+    _rotate_dailyprogress()
+    db.reference("dailyprogress").set(
         {
             "createdOnCount": created_on_count,
             "ticketStatusChanges": [
                 {"from": k[0], "to": k[1], "count": v}
-                for k, v in sorted(status_changes.items(), key=lambda x: (-x[1], x[0]))
+                for k, v in sorted(status_changes.items(), key=_sort_change)
             ],
             "ticketStatusTextChanges": [
                 {"from": k[0], "to": k[1], "count": v}
-                for k, v in sorted(status_text_changes.items(), key=lambda x: (-x[1], x[0]))
+                for k, v in sorted(status_text_changes.items(), key=_sort_change)
             ],
             "ticketStatusDiffs": changed_tickets,
+            "previousSnapshot": {
+                "root": previous_root,
+                "updateAt": previous_updateat,
+                "ticketCount": len(previous),
+            },
+            "currentSnapshot": {
+                "root": current_root,
+                "updateAt": current_updateat,
+                "ticketCount": len(current),
+            },
         }
     )
 
