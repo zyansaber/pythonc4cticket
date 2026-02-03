@@ -5,8 +5,10 @@ from __future__ import annotations
 
 import os
 import time
+from datetime import datetime, timezone
 from typing import Dict, Any, List, Set, Tuple
 from urllib.parse import quote
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
 from requests.auth import HTTPBasicAuth
@@ -27,7 +29,7 @@ USERNAME = "XIEYONGDONG@newgonow.cn"
 PASSWORD = "Max@sap2022"
 ROLE_CODES = ["1001", "40", "43"]
 
-API_TOP = 200
+API_TOP = 500
 API_SKIP_START = 0
 TIMEOUT = 60
 VERIFY_SSL = True
@@ -39,11 +41,13 @@ FIREBASE_SA_PATH = r"C:\Users\yan\Desktop\snowy-hr-report-firebase-adminsdk-fbsv
 
 FIREBASE_ROOT = "c4cTickets_test"   # 写入根（不要带 /）
 DELETE_BEFORE_UPLOAD = True
+MAX_BACKUPS = 30
 
 # 你原来按 ticket 数量 flush 没问题，但还需要加“路径数/字节数”保险
 BATCH_TICKETS = 500
 MAX_PATHS_PER_UPDATE = 8000           # ✅ 单次 update 最大路径数（保险）
 MAX_BYTES_PER_UPDATE = 6_000_000      # ✅ 单次 update 估算最大字节（保险）
+MAX_WORKERS = 8                       # ✅ 并发拉取页数（提升速度）
 # ===============================================
 
 SERVER_TIMESTAMP = {".sv": "timestamp"}
@@ -53,10 +57,6 @@ ROLE_VARYING_FIELDS = [
     "InvolvedPartyID",
     "InvolvedPartyName",
     "InvolvedPartyRoleID",
-    "RepairerBusinessNameID",
-    "RepairerEmail",
-    "RepairerPhoneNumber",
-    "RepairerNamePointOfContact",
     "requested_skip",
 ]
 
@@ -130,23 +130,64 @@ def fetch_role_page(session: requests.Session, role_code: str, top: int, skip: i
     return rows, meta
 
 
+def _fetch_role_page_fresh_session(role_code: str, top: int, skip: int):
+    sess = make_session()
+    try:
+        rows, meta = fetch_role_page(sess, role_code, top, skip)
+    finally:
+        sess.close()
+    return skip, rows, meta
+
+
 def iter_role_all_rows(session: requests.Session, role_code: str):
     skip = API_SKIP_START
     page = 0
-    while True:
-        rows, meta = fetch_role_page(session, role_code, API_TOP, skip)
-        page += 1
-        print(f"[FETCH] role={role_code} page={page} skip={skip} rows={len(rows)} meta={meta}")
+    rows, meta = fetch_role_page(session, role_code, API_TOP, skip)
+    page += 1
+    print(f"[FETCH] role={role_code} page={page} skip={skip} rows={len(rows)} meta={meta}")
 
-        if not rows:
-            break
+    if not rows:
+        return
 
-        for rr in rows:
-            yield rr
+    for rr in rows:
+        yield rr
 
-        if len(rows) < API_TOP:
-            break
-        skip += API_TOP
+    total_raw = meta.get("totalCount") or meta.get("count")
+    if total_raw in (None, "", 0, "0"):
+        while True:
+            skip += API_TOP
+            rows, meta = fetch_role_page(session, role_code, API_TOP, skip)
+            page += 1
+            print(f"[FETCH] role={role_code} page={page} skip={skip} rows={len(rows)} meta={meta}")
+            if not rows:
+                break
+            for rr in rows:
+                yield rr
+            if len(rows) < API_TOP:
+                break
+        return
+
+    try:
+        total = int(total_raw)
+    except (TypeError, ValueError):
+        total = None
+
+    if not total:
+        return
+
+    skips = list(range(skip + API_TOP, total, API_TOP))
+    if not skips:
+        return
+
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        future_map = {executor.submit(_fetch_role_page_fresh_session, role_code, API_TOP, sk): sk for sk in skips}
+        for future in as_completed(future_map):
+            sk = future_map[future]
+            rows, meta = future.result()[1:]
+            page += 1
+            print(f"[FETCH] role={role_code} page~={page} skip={sk} rows={len(rows)} meta={meta}")
+            for rr in rows:
+                yield rr
 
 
 # ---------- Firebase init ----------
@@ -320,6 +361,207 @@ def fb_update_with_retry(path: str, payload: dict, tries: int = 5):
     raise RuntimeError(f"[FB] update failed after {tries} tries: {last_err}")
 
 
+def _as_ticket_map(value: Any) -> Dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, list):
+        return {str(idx): item for idx, item in enumerate(value) if item is not None}
+    return {}
+
+
+def _normalize_ticket_map(raw: Dict[Any, Any]) -> Dict[str, Any]:
+    return {str(k): v for k, v in raw.items()}
+
+
+def _rotate_dailyprogress(max_backups: int = MAX_BACKUPS) -> None:
+    oldest = f"dailyprogress_{max_backups}"
+    if _root_exists(oldest):
+        fb_delete_tree(oldest)
+
+    for i in range(max_backups - 1, 0, -1):
+        src = f"dailyprogress_{i}"
+        dst = f"dailyprogress_{i + 1}"
+        if _root_exists(src):
+            _copy_root(src, dst)
+            fb_delete_tree(src)
+
+    if _root_exists("dailyprogress"):
+        _copy_root("dailyprogress", "dailyprogress_1")
+
+
+def _role_names_for_change(
+    current: Dict[str, Any],
+    previous: Dict[str, Any],
+    change_pair: Tuple[Any, Any],
+    field: str = "TicketStatus",
+) -> List[str]:
+    names = set()
+    for tid, curr_ticket in current.items():
+        prev_ticket = previous.get(tid, {})
+        curr_info = (curr_ticket or {}).get("ticket", {})
+        prev_info = (prev_ticket or {}).get("ticket", {})
+        if (prev_info.get(field), curr_info.get(field)) == change_pair:
+            role_40_name = (curr_ticket or {}).get("roles", {}).get("40", {}).get("InvolvedPartyName")
+            if role_40_name:
+                names.add(role_40_name)
+    return sorted(names)
+
+
+def _root_exists(path: str) -> bool:
+    return db.reference(path).get(shallow=True) is not None
+
+
+def _copy_root(src: str, dst: str) -> None:
+    data = db.reference(src).get()
+    if data is None:
+        fb_delete_tree(dst)
+        return
+    db.reference(dst).set(data)
+
+
+def rotate_backups() -> None:
+    oldest = f"{FIREBASE_ROOT}_{MAX_BACKUPS}"
+    if _root_exists(oldest):
+        fb_delete_tree(oldest)
+
+    for i in range(MAX_BACKUPS - 1, 0, -1):
+        src = f"{FIREBASE_ROOT}_{i}"
+        dst = f"{FIREBASE_ROOT}_{i + 1}"
+        if _root_exists(src):
+            _copy_root(src, dst)
+            fb_delete_tree(src)
+
+    if _root_exists(FIREBASE_ROOT):
+        _copy_root(FIREBASE_ROOT, f"{FIREBASE_ROOT}_1")
+
+
+def diff_ticket_summaries(current_root: str, previous_root: str) -> None:
+    current_raw = db.reference(f"{current_root}/tickets").get()
+    previous_raw = db.reference(f"{previous_root}/tickets").get()
+    current = _normalize_ticket_map(_as_ticket_map(current_raw))
+    previous = _normalize_ticket_map(_as_ticket_map(previous_raw))
+
+    created_on_count_current = sum(
+        1 for ticket in current.values() if isinstance(ticket, dict) and ticket.get("ticket", {}).get("CreatedOn")
+    )
+    created_on_count_previous = sum(
+        1 for ticket in previous.values() if isinstance(ticket, dict) and ticket.get("ticket", {}).get("CreatedOn")
+    )
+
+    status_changes: Dict[Tuple[Any, Any], int] = {}
+    status_text_changes: Dict[Tuple[Any, Any], int] = {}
+    changed_tickets: List[Dict[str, Any]] = []
+
+    for tid, curr_ticket in current.items():
+        prev_ticket = previous.get(tid, {})
+        curr_info = (curr_ticket or {}).get("ticket", {})
+        prev_info = (prev_ticket or {}).get("ticket", {})
+
+        curr_status = curr_info.get("TicketStatus")
+        prev_status = prev_info.get("TicketStatus")
+        if curr_status != prev_status:
+            status_changes[(prev_status, curr_status)] = status_changes.get((prev_status, curr_status), 0) + 1
+
+        curr_status_text = curr_info.get("TicketStatusText")
+        prev_status_text = prev_info.get("TicketStatusText")
+        if curr_status_text != prev_status_text:
+            status_text_changes[(prev_status_text, curr_status_text)] = (
+                status_text_changes.get((prev_status_text, curr_status_text), 0) + 1
+            )
+
+        if curr_status != prev_status or curr_status_text != prev_status_text:
+            role_40_name = (curr_ticket or {}).get("roles", {}).get("40", {}).get("InvolvedPartyName")
+            changed_tickets.append(
+                {
+                    "TicketID": tid,
+                    "TicketStatusOld": prev_status,
+                    "TicketStatusNew": curr_status,
+                    "TicketStatusTextOld": prev_status_text,
+                    "TicketStatusTextNew": curr_status_text,
+                    "Role40InvolvedPartyName": role_40_name,
+                }
+            )
+
+    print("\n================ DIFF SUMMARY ================")
+    print(f"Tickets with CreatedOn in {current_root}: {created_on_count_current}")
+    def _sort_change(item: Tuple[Tuple[Any, Any], int]) -> Tuple[int, str]:
+        key, count = item
+        return (-count, f"{key[0]}->{key[1]}")
+
+    print("TicketStatus changes (prev -> curr):")
+    for (prev_status, curr_status), count in sorted(status_changes.items(), key=_sort_change):
+        print(f"  {prev_status} -> {curr_status}: {count}")
+    print("TicketStatusText changes (prev -> curr):")
+    for (prev_text, curr_text), count in sorted(status_text_changes.items(), key=_sort_change):
+        print(f"  {prev_text} -> {curr_text}: {count}")
+    print("Changed tickets (TicketID | Old/New Status | Old/New StatusText | roles/40 InvolvedPartyName):")
+    for item in changed_tickets:
+        print(
+            "  {TicketID} | {TicketStatusOld}->{TicketStatusNew} | "
+            "{TicketStatusTextOld}->{TicketStatusTextNew} | {Role40InvolvedPartyName}".format(**item)
+        )
+
+    previous_updateat = db.reference(f"{previous_root}/updateat").get()
+    current_updateat = db.reference(f"{current_root}/updateat").get()
+
+    _rotate_dailyprogress()
+    db.reference("dailyprogress").set(
+        {
+            "createdOnCountCurrent": created_on_count_current,
+            "createdOnCountPrevious": created_on_count_previous,
+            "createdOnCountDelta": created_on_count_current - created_on_count_previous,
+            "ticketStatusChanges": [
+                {"from": k[0], "to": k[1], "count": v, "role40InvolvedPartyNames": _role_names_for_change(current, previous, k)}
+                for k, v in sorted(status_changes.items(), key=_sort_change)
+            ],
+            "ticketStatusTextChanges": [
+                {
+                    "from": k[0],
+                    "to": k[1],
+                    "count": v,
+                    "role40InvolvedPartyNames": _role_names_for_change(current, previous, k, field="TicketStatusText"),
+                }
+                for k, v in sorted(status_text_changes.items(), key=_sort_change)
+            ],
+            "changedTickets": changed_tickets,
+            "currentUpdateAt": current_updateat,
+            "previousUpdateAt": previous_updateat,
+            "previousSnapshot": {
+                "root": previous_root,
+                "updateAt": previous_updateat,
+                "ticketCount": len(previous),
+            },
+            "currentSnapshot": {
+                "root": current_root,
+                "updateAt": current_updateat,
+                "ticketCount": len(current),
+            },
+        }
+    )
+
+    daily_updateat = current_updateat or datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    status_daily_counts: Dict[str, int] = {}
+    for ticket in current.values():
+        if not isinstance(ticket, dict):
+            continue
+        status_text = ticket.get("ticket", {}).get("TicketStatusText")
+        if status_text is None:
+            continue
+        status_key = str(status_text)
+        status_daily_counts[status_key] = status_daily_counts.get(status_key, 0) + 1
+
+    db.reference("ticketStatusDaily").update(
+        {
+            "history": {
+                daily_updateat: {
+                    "updateAt": daily_updateat,
+                    "counts": status_daily_counts,
+                }
+            }
+        }
+    )
+
+
 def split_ticket_row(row: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     ticket_data: Dict[str, Any] = {}
     role_data: Dict[str, Any] = {}
@@ -355,6 +597,8 @@ def main():
         raise SystemExit("请先填写 USERNAME / PASSWORD（建议用环境变量 C4C_USERNAME / C4C_PASSWORD）")
 
     firebase_init()
+
+    rotate_backups()
 
     if DELETE_BEFORE_UPLOAD:
         print(f"[FB] deleting /{FIREBASE_ROOT} (safe batched) ...")
@@ -420,6 +664,10 @@ def main():
     print(f"Total unique TicketIDs seen: {len(total_unique_tickets_seen)}")
     print(f"Total batches uploaded: {batch_no}")
     print(f"✅ Uploaded to /{FIREBASE_ROOT}/tickets/<TicketID>/ticket + roles/<roleCode> + updatedAt (FULL LOAD)")
+    db.reference(FIREBASE_ROOT).update(
+        {"updateat": datetime.now(timezone.utc).replace(microsecond=0).isoformat()}
+    )
+    diff_ticket_summaries(FIREBASE_ROOT, f"{FIREBASE_ROOT}_1")
 
 
 if __name__ == "__main__":
