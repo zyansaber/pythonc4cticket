@@ -540,22 +540,26 @@ def diff_ticket_summaries(current_root: str, previous_root: str) -> None:
     )
 
     daily_updateat = current_updateat or datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    daily_updateat_key = sanitize_fb_key(daily_updateat)
     status_daily_counts: Dict[str, int] = {}
+    status_daily_labels: Dict[str, str] = {}
     for ticket in current.values():
         if not isinstance(ticket, dict):
             continue
         status_text = ticket.get("ticket", {}).get("TicketStatusText")
         if status_text is None:
             continue
-        status_key = str(status_text)
+        status_key = sanitize_fb_key(status_text)
         status_daily_counts[status_key] = status_daily_counts.get(status_key, 0) + 1
+        status_daily_labels.setdefault(status_key, str(status_text))
 
     db.reference("ticketStatusDaily").update(
         {
             "history": {
-                daily_updateat: {
+                daily_updateat_key: {
                     "updateAt": daily_updateat,
                     "counts": status_daily_counts,
+                    "labels": status_daily_labels,
                 }
             }
         }
