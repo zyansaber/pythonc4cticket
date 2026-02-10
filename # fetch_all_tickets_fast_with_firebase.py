@@ -28,6 +28,7 @@ PATH = "/http/PC4C/Ticket/queryOdataBatch"
 USERNAME = "XIEYONGDONG@newgonow.cn" 
 PASSWORD = "Max@sap2022"
 ROLE_CODES = ["1001", "40", "43"]
+PRIMARY_ROLE_CODES = {"1001", "40", "43"}
 
 API_TOP = 500
 API_SKIP_START = 0
@@ -566,20 +567,24 @@ def diff_ticket_summaries(current_root: str, previous_root: str) -> None:
     )
 
 
-def split_ticket_row(row: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+def split_ticket_row(row: Dict[str, Any], role_code: str) -> Tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
     ticket_data: Dict[str, Any] = {}
+    ticket_involved_patch: Dict[str, Any] = {}
     role_data: Dict[str, Any] = {}
+    allow_involved_patch = role_code not in PRIMARY_ROLE_CODES
 
     for k, v in row.items():
         v2 = norm(v)
         if k in ROLE_VARYING_FIELDS:
             role_data[k] = v2
+            if allow_involved_patch and k.startswith("InvolvedParty"):
+                ticket_involved_patch[k] = v2
         elif k in REQUEST_META_FIELDS:
             continue
         else:
             ticket_data[k] = v2
 
-    return ticket_data, role_data
+    return ticket_data, role_data, ticket_involved_patch
 
 
 def _rough_bytes(payload: Dict[str, Any]) -> int:
@@ -632,7 +637,7 @@ def main():
             tid_key = sanitize_fb_key(tid)
             total_unique_tickets_seen.add(tid_key)
 
-            ticket_data, role_data = split_ticket_row(row)
+            ticket_data, role_data, ticket_involved_patch = split_ticket_row(row, role_code)
 
             # roles 节点：每个 role_code 一份
             updates_batch[f"tickets/{tid_key}/roles/{role_code}"] = role_data
@@ -642,6 +647,10 @@ def main():
             if tid_key not in base_written:
                 updates_batch[f"tickets/{tid_key}/ticket"] = ticket_data
                 base_written.add(tid_key)
+
+            # 非 40/43/1001 的 role 允许补写 involved party 到 ticket 节点
+            for involved_field, involved_value in ticket_involved_patch.items():
+                updates_batch[f"tickets/{tid_key}/ticket/{involved_field}"] = involved_value
 
             if tid_key not in batch_ticket_set:
                 batch_ticket_set.add(tid_key)
